@@ -381,6 +381,10 @@ def should_include_package_path(
         return False
     if normalized == "data/installed-app-manifest.json" or "ffmpeg" in normalized.split("/"):
         return False
+    if normalized == "data/runtime-manifest.json":
+        return runtime_release_tag == _normalize_version(version)
+    if normalized == "data/updater-manifest.json":
+        return updater_release_tag == _normalize_version(version)
     if normalized.startswith("data/node/"):
         return runtime_release_tag == _normalize_version(version)
     if normalized.startswith("updater/"):
@@ -455,6 +459,14 @@ def _release_body(version: str, assets: Iterable[Path]) -> str:
             "- Setup giữ nguyên settings, history, cookies, token, proxy, thumbnails và yt-dlp hiện có.",
             "- Bản này không phát hành Smart Update `.zip`; từ v1.0.14 sẽ dùng `app-update-v2.pkg`.",
             "- `node-runtime-win-x64.pkg` dùng cho cơ chế tự sửa Node portable.",
+            "",
+        ])
+    elif normalized_version == "1.0.14":
+        lines.extend([
+            "- Setup có tùy chọn `Create a Desktop shortcut`, được chọn mặc định.",
+            "- Sửa kiểm tra yt-dlp + Node thành smoke test offline bằng extractor nội bộ `test:`.",
+            "- Smoke test không truy cập YouTube, không tải video và không phụ thuộc bot-check/cookies.",
+            "- Hỗ trợ Smart Update an toàn từ v1.0.13 bằng `app-update-v2.pkg`.",
             "",
         ])
     lines.extend(["### SHA256", ""])

@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-v1.0.13 là bản chuyển đổi một lần từ updater cũ sang hệ thống updater v2.
+v1.0.14 là bản Smart Update đầu tiên, đồng thời sửa smoke test yt-dlp thành kiểm tra offline.
 
 ## Update migration
 
@@ -11,6 +11,8 @@ v1.0.13 là bản chuyển đổi một lần từ updater cũ sang hệ thống
 - Setup cài Node 24.12.0, `UpdaterLauncher.exe` ổn định và worker có version.
 - Từ v1.0.14, Smart Update chỉ chọn chính xác `app-update-v2.pkg` có SHA256 digest từ GitHub Release API.
 - Hai nút cập nhật vẫn độc lập; chúng chỉ dùng chung transaction, mutex, checksum, proxy, progress và log.
+- Smoke test yt-dlp dùng extractor nội bộ `test:`; không truy cập YouTube hoặc tải video.
+- Setup v1.0.14 có checkbox tạo Desktop shortcut và được chọn mặc định.
 
 ## Existing features
 

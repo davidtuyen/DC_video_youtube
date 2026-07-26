@@ -185,7 +185,7 @@ class UpdateManagerTests(unittest.TestCase):
             self.assertEqual(result.changed_components, ("node", "yt-dlp"))
             self.assertEqual(yt_dlp_path.read_bytes(), b"new-yt-dlp")
 
-    def test_update_yt_dlp_uses_official_checksum_and_accepts_auth_smoke_error(self):
+    def test_update_yt_dlp_uses_official_checksum_and_offline_smoke(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             node_bytes = b"portable-node"
             self._write_manifest(temp_dir, node_bytes)
@@ -193,6 +193,7 @@ class UpdateManagerTests(unittest.TestCase):
             node_path.parent.mkdir(parents=True)
             node_path.write_bytes(node_bytes)
             yt_dlp_bytes = b"verified-yt-dlp"
+            smoke_commands = []
 
             def downloader(url, destination, **_kwargs):
                 if url.endswith("SHA2-256SUMS"):
@@ -207,11 +208,12 @@ class UpdateManagerTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, "v24.12.0\n", "")
                 if "--version" in command:
                     return subprocess.CompletedProcess(command, 0, "2026.07.01\n", "")
+                smoke_commands.append(command)
                 return subprocess.CompletedProcess(
                     command,
-                    1,
+                    0,
+                    "[debug] JS runtimes: node-24.12.0\n",
                     "",
-                    "[debug] JS runtimes: node-24.12.0\nERROR: Sign in to confirm you're not a bot\n",
                 )
 
             manager = self.module.UpdateManager(
@@ -220,6 +222,7 @@ class UpdateManagerTests(unittest.TestCase):
                 repo_name="repo",
                 command_runner=runner,
                 downloader=downloader,
+                proxy_url="http://127.0.0.1:8080",
             )
 
             result = manager.update_yt_dlp()
@@ -229,6 +232,12 @@ class UpdateManagerTests(unittest.TestCase):
                 (Path(temp_dir) / "yt-dlp" / "yt-dlp.exe").read_bytes(),
                 yt_dlp_bytes,
             )
+            self.assertEqual(len(smoke_commands), 1)
+            self.assertIn("--ignore-config", smoke_commands[0])
+            self.assertEqual(smoke_commands[0][-2:], ["--", "test:"])
+            self.assertNotIn("--proxy", smoke_commands[0])
+            self.assertNotIn("--no-update", smoke_commands[0])
+            self.assertFalse(any("youtube.com" in argument for argument in smoke_commands[0]))
 
     def test_update_yt_dlp_rejects_unrelated_nonzero_smoke_failure(self):
         with tempfile.TemporaryDirectory() as temp_dir:

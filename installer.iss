@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.13"
+  #define MyAppVersion "1.0.14"
 #endif
 #ifndef MySourceDir
   #define MySourceDir "dist\YouTube Downloader Pro"
@@ -29,12 +29,16 @@ CloseApplicationsFilter=YouTube Downloader Pro.exe,UpdaterLauncher.exe,UpdaterWo
 Uninstallable=yes
 WizardStyle=modern
 
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+
 [Files]
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "data\downloader_settings*.json,data\download_history.json,data\token*.json,data\credentials.json,data\proxy_settings.json,data\cookies.txt,cookies.txt,youtube_cookies.txt,yt-dlp\*"
 Source: "{#MySourceDir}\yt-dlp\*"; DestDir: "{app}\yt-dlp"; Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist; Check: DirExists(ExpandConstant('{#MySourceDir}\yt-dlp'))
 
 [Icons]
 Name: "{autoprograms}\YouTube Downloader Pro"; Filename: "{app}\YouTube Downloader Pro.exe"
+Name: "{autodesktop}\YouTube Downloader Pro"; Filename: "{app}\YouTube Downloader Pro.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\YouTube Downloader Pro.exe"; Description: "Launch YouTube Downloader Pro"; Flags: nowait postinstall skipifsilent

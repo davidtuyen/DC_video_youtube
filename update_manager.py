@@ -625,15 +625,14 @@ class UpdateManager:
 
                     smoke_command = [
                         str(staged),
-                        "--simulate",
-                        "--no-playlist",
+                        "--ignore-config",
                         "--verbose",
                         "--js-runtimes",
                         f"node:{runtime_path}",
+                        "--simulate",
+                        "--",
+                        "test:",
                     ]
-                    if self.proxy_url:
-                        smoke_command.extend(["--proxy", self.proxy_url])
-                    smoke_command.append("https://www.youtube.com/watch?v=BaW_jenozKc")
                     smoke_result = self.command_runner(smoke_command, timeout=60)
                     smoke_output = (smoke_result.stdout or "") + (smoke_result.stderr or "")
                     if "No supported JavaScript runtime could be found" in smoke_output:
@@ -643,17 +642,7 @@ class UpdateManager:
                     )
                     if not runtime_detected:
                         raise RuntimeError("yt-dlp smoke test did not confirm the bundled Node runtime")
-                    known_auth_failure = any(
-                        marker in smoke_output
-                        for marker in (
-                            "Sign in to confirm you're not a bot",
-                            "Sign in to confirm you’re not a bot",
-                            "Use --cookies-from-browser",
-                        )
-                    )
-                    if smoke_result.returncode != 0 and not (
-                        smoke_result.returncode == 1 and known_auth_failure
-                    ):
+                    if smoke_result.returncode != 0:
                         raise RuntimeError(
                             (smoke_result.stderr or smoke_result.stdout or "yt-dlp smoke test failed").strip()
                         )

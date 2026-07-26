@@ -61,7 +61,7 @@ class PublishPackagingTests(unittest.TestCase):
             self.assertNotIn("UpdaterLauncher.exe", entries)
             self.assertNotIn("data/downloader_settings_qt.json", entries)
 
-    def test_unchanged_runtime_and_worker_are_not_reshipped(self):
+    def test_unchanged_runtime_worker_and_manifests_are_not_reshipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             dist_dir = Path(temp_dir) / "dist"
             self._make_dist(dist_dir, runtime_tag="1.0.13", updater_tag="1.0.13")
@@ -73,8 +73,8 @@ class PublishPackagingTests(unittest.TestCase):
             paths = {entry["path"] for entry in manifest["files"]}
             self.assertNotIn("data/node/node.exe", paths)
             self.assertNotIn("updater/UpdaterWorker-2.1.0.exe", paths)
-            self.assertIn("data/runtime-manifest.json", paths)
-            self.assertIn("data/updater-manifest.json", paths)
+            self.assertNotIn("data/runtime-manifest.json", paths)
+            self.assertNotIn("data/updater-manifest.json", paths)
 
     def test_v1013_refuses_smart_package(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -151,6 +151,19 @@ class PublishPackagingTests(unittest.TestCase):
         self.assertIn(setup.name, body)
         self.assertIn(runtime.name, body)
 
+    def test_v1014_release_notes_describe_offline_smoke_and_shortcut(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            setup = Path(temp_dir) / "YouTubeDownloaderPro-Setup-v1.0.14.exe"
+            smart = Path(temp_dir) / "app-update-v2.pkg"
+            setup.write_bytes(b"setup")
+            smart.write_bytes(b"smart")
+
+            body = publish._release_body("1.0.14", [setup, smart])
+
+        self.assertIn("Desktop shortcut", body)
+        self.assertIn("offline", body)
+        self.assertIn("không truy cập YouTube", body)
+
     def test_published_release_is_never_modified(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             asset = Path(temp_dir) / "app-update-v2.pkg"
@@ -212,6 +225,22 @@ class PublishPackagingTests(unittest.TestCase):
         self.assertEqual(assets, [setup, runtime])
         self.assertFalse(any(path.suffix.casefold() == ".zip" for path in assets))
 
+    def test_v1014_release_contains_setup_and_smart_package_only(self):
+        setup = Path("YouTubeDownloaderPro-Setup-v1.0.14.exe")
+        runtime = Path("node-runtime-win-x64.pkg")
+        smart = Path("app-update-v2.pkg")
+        updater_outputs = (Path("launcher.exe"), Path("worker.exe"), {})
+
+        with mock.patch.object(publish, "clean_build"):
+            with mock.patch.object(publish, "prepare_runtime_assets", return_value=runtime):
+                with mock.patch.object(publish, "build_updaters", return_value=updater_outputs):
+                    with mock.patch.object(publish, "build_main_app", return_value=Path("app")):
+                        with mock.patch.object(publish, "build_installer", return_value=setup):
+                            with mock.patch.object(publish, "create_package", return_value=smart):
+                                assets = publish.build_release_assets("1.0.14")
+
+        self.assertEqual(assets, [setup, smart])
+
     def test_installer_script_preserves_user_state_and_existing_ytdlp(self):
         script_path = publish.REPO_ROOT / "installer.iss"
         self.assertTrue(script_path.is_file(), "installer.iss must exist")
@@ -228,6 +257,15 @@ class PublishPackagingTests(unittest.TestCase):
             self.assertIn(protected, script)
         self.assertIn("yt-dlp", script)
         self.assertIn("onlyifdoesntexist", script)
+
+    def test_installer_desktop_shortcut_task_is_checked_by_default(self):
+        script = (publish.REPO_ROOT / "installer.iss").read_text(encoding="utf-8")
+
+        self.assertIn("[Tasks]", script)
+        task_line = next(line for line in script.splitlines() if 'Name: "desktopicon"' in line)
+        self.assertNotIn("unchecked", task_line.casefold())
+        self.assertIn('Name: "{autodesktop}\\YouTube Downloader Pro"', script)
+        self.assertIn("Tasks: desktopicon", script)
 
     def test_inno_compiler_is_found_in_per_user_install(self):
         with tempfile.TemporaryDirectory() as temp_dir:
