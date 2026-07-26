@@ -10,6 +10,9 @@
 - Installer migration v1.0.13 giữ nguyên dữ liệu người dùng và yt-dlp hiện có.
 - Smoke test yt-dlp chạy offline bằng extractor nội bộ `test:`.
 - Setup v1.0.14 có tùy chọn tạo Desktop shortcut.
+- Runtime manifest v2 và transaction xác minh cả `node.exe` lẫn `LICENSE` trước/sau khi ghi.
+- Pipeline Setup tải yt-dlp 2026.07.04 từ release chính thức và xác minh checksum/version/smoke offline.
+- Publisher đối chiếu chính xác toàn bộ draft asset trước khi publish.
 
 ## Release rules
 
@@ -19,4 +22,4 @@
 
 ## Pending
 
-- Build, kiểm thử E2E và publish release v1.0.14.
+- Build, kiểm thử E2E và publish release v1.0.15.

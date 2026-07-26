@@ -35,10 +35,18 @@ NODE_DISTRIBUTION_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/{NODE_DISTRIBU
 NODE_SHASUMS_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/SHASUMS256.txt"
 RUNTIME_ASSET_NAME = "node-runtime-win-x64.pkg"
 NODE_RUNTIME_RELEASE_TAG = "1.0.13"
+YT_DLP_VERSION = "2026.07.04"
+YT_DLP_BINARY_URL = (
+    f"https://github.com/yt-dlp/yt-dlp/releases/download/{YT_DLP_VERSION}/yt-dlp.exe"
+)
+YT_DLP_SHASUMS_URL = (
+    f"https://github.com/yt-dlp/yt-dlp/releases/download/{YT_DLP_VERSION}/SHA2-256SUMS"
+)
 UPDATER_PROTOCOL_VERSION = 2
-UPDATER_WORKER_VERSION = "2.0.0"
-UPDATER_WORKER_RELEASE_TAG = "1.0.13"
+UPDATER_WORKER_VERSION = "2.1.0"
+UPDATER_WORKER_RELEASE_TAG = "1.0.15"
 MINIMUM_SMART_UPDATE_VERSION = "1.0.13"
+MINIMUM_RUNTIME_SMART_UPDATE_VERSION = "1.0.15"
 
 REPO_ROOT = Path(__file__).parent.resolve()
 DIST_DIR = REPO_ROOT / "dist"
@@ -179,6 +187,77 @@ def prepare_runtime_assets(release_tag: str = NODE_RUNTIME_RELEASE_TAG) -> Path:
     return return_path
 
 
+def prepare_pinned_yt_dlp(node_path: Path) -> Path:
+    """Download and validate the exact yt-dlp binary shipped by the installer."""
+    node_path = Path(node_path).resolve()
+    if not node_path.is_file():
+        raise FileNotFoundError(f"Portable Node is missing: {node_path}")
+    checksums = _download_bytes(YT_DLP_SHASUMS_URL).decode("utf-8")
+    expected_hash = None
+    for line in checksums.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1].lstrip("*") == "yt-dlp.exe":
+            expected_hash = parts[0].casefold()
+            break
+    if not expected_hash or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        raise RuntimeError("Official SHA256 for yt-dlp.exe is missing")
+    binary = _download_bytes(YT_DLP_BINARY_URL)
+    if hashlib.sha256(binary).hexdigest() != expected_hash:
+        raise RuntimeError("Official yt-dlp SHA256 mismatch")
+
+    download_dir = BUILD_DIR / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    staged = download_dir / f".yt-dlp-{YT_DLP_VERSION}.tmp.exe"
+    destination = download_dir / "yt-dlp.exe"
+    staged.write_bytes(binary)
+    try:
+        version_result = subprocess.run(
+            [str(staged), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        actual_version = (version_result.stdout or "").strip()
+        if version_result.returncode != 0 or actual_version != YT_DLP_VERSION:
+            raise RuntimeError(
+                f"Pinned yt-dlp version check failed: expected {YT_DLP_VERSION}, "
+                f"got {actual_version or 'no version'}"
+            )
+        smoke_command = [
+            str(staged),
+            "--ignore-config",
+            "--verbose",
+            "--js-runtimes",
+            f"node:{node_path}",
+            "--simulate",
+            "--",
+            "test:",
+        ]
+        smoke_result = subprocess.run(
+            smoke_command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        smoke_output = (smoke_result.stdout or "") + (smoke_result.stderr or "")
+        if smoke_result.returncode != 0:
+            raise RuntimeError(
+                "Pinned yt-dlp smoke test failed: "
+                + (smoke_result.stderr or smoke_result.stdout or "unknown error").strip()
+            )
+        if not re.search(r"JS runtimes:\s*[^\r\n]*node", smoke_output, re.IGNORECASE):
+            raise RuntimeError("Pinned yt-dlp runtime detection failed")
+        os.replace(staged, destination)
+    finally:
+        try:
+            staged.unlink()
+        except FileNotFoundError:
+            pass
+    return destination
+
+
 def _resolve_icon_path() -> Path | None:
     for candidate in (
         REPO_ROOT / ICON_FILE,
@@ -239,7 +318,11 @@ def build_updaters(_release_tag: str) -> tuple[Path, Path, dict]:
     return launcher_path, worker_path, manifest
 
 
-def build_main_app(version: str, updater_outputs: tuple[Path, Path, dict]) -> Path:
+def build_main_app(
+    version: str,
+    updater_outputs: tuple[Path, Path, dict],
+    verified_yt_dlp: Path | None = None,
+) -> Path:
     _run_pyinstaller(
         APP_NAME,
         REPO_ROOT / MAIN_SCRIPT,
@@ -263,9 +346,11 @@ def build_main_app(version: str, updater_outputs: tuple[Path, Path, dict]) -> Pa
             "downloader_settings*.json",
         ),
     )
-    source_yt_dlp = REPO_ROOT / "yt-dlp"
-    if source_yt_dlp.is_dir():
-        shutil.copytree(source_yt_dlp, app_dir / "yt-dlp", dirs_exist_ok=True)
+    if verified_yt_dlp is None or not Path(verified_yt_dlp).is_file():
+        raise FileNotFoundError("Verified pinned yt-dlp binary is required")
+    yt_dlp_destination = app_dir / "yt-dlp" / "yt-dlp.exe"
+    yt_dlp_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(verified_yt_dlp, yt_dlp_destination)
     launcher, worker, updater_manifest = updater_outputs
     shutil.copy2(launcher, app_dir / "UpdaterLauncher.exe")
     worker_destination = app_dir / updater_manifest["worker"]["path"]
@@ -403,6 +488,7 @@ def create_package(mode: str, version: str) -> Path:
         raise ValueError("v1.0.13 is installer-only")
     app_dir = DIST_DIR / APP_NAME
     runtime_tag, updater_tag, worker_path = _read_release_tags(app_dir)
+    includes_runtime = runtime_tag == _normalize_version(version)
     included: list[tuple[Path, Path]] = []
     for path in app_dir.rglob("*"):
         if not path.is_file():
@@ -429,7 +515,11 @@ def create_package(mode: str, version: str) -> Path:
     manifest = {
         "schema_version": 2,
         "app_version": _normalize_version(version),
-        "minimum_app_version": MINIMUM_SMART_UPDATE_VERSION,
+        "minimum_app_version": (
+            MINIMUM_RUNTIME_SMART_UPDATE_VERSION
+            if includes_runtime
+            else MINIMUM_SMART_UPDATE_VERSION
+        ),
         "files": entries,
     }
     package = DIST_DIR / "app-update-v2.pkg"
@@ -469,6 +559,14 @@ def _release_body(version: str, assets: Iterable[Path]) -> str:
             "- Hỗ trợ Smart Update an toàn từ v1.0.13 bằng `app-update-v2.pkg`.",
             "",
         ])
+    elif normalized_version == "1.0.15":
+        lines.extend([
+            "- Runtime validation now covers both `node.exe` and `LICENSE`, including rollback after installation.",
+            "- Smart Update ships `UpdaterWorker 2.1.0`; Node 24.12.0 remains unchanged and is not included in this package.",
+            "- Setup ships the pinned, checksum-verified yt-dlp 2026.07.04 build.",
+            "- Draft releases are published only after the complete asset set, sizes and SHA256 digests match.",
+            "",
+        ])
     lines.extend(["### SHA256", ""])
     for asset in assets:
         path = Path(asset)
@@ -476,10 +574,39 @@ def _release_body(version: str, assets: Iterable[Path]) -> str:
     return "\n".join(lines)
 
 
+def _verify_release_assets(release: dict, assets: Sequence[Path], version: str) -> None:
+    if not release.get("draft"):
+        raise RuntimeError("Release changed state before asset verification")
+    if _normalize_version(str(release.get("tag_name", ""))) != _normalize_version(version):
+        raise RuntimeError("Release tag changed before asset verification")
+    expected = {path.name: path for path in assets}
+    if len(expected) != len(assets):
+        raise RuntimeError("Local release asset names must be unique")
+    remote_assets = release.get("assets")
+    if not isinstance(remote_assets, list):
+        raise RuntimeError("GitHub release asset metadata is missing")
+    remote_names = [str(item.get("name", "")) for item in remote_assets]
+    if len(remote_names) != len(set(remote_names)):
+        raise RuntimeError("GitHub release contains duplicate asset names")
+    if set(remote_names) != set(expected):
+        raise RuntimeError("GitHub release asset set does not match the build")
+    for metadata in remote_assets:
+        path = expected[str(metadata["name"])]
+        expected_digest = f"sha256:{sha256_file(path)}"
+        if (
+            metadata.get("state") != "uploaded"
+            or int(metadata.get("size", -1)) != path.stat().st_size
+            or str(metadata.get("digest", "")).casefold() != expected_digest
+        ):
+            raise RuntimeError(f"GitHub release asset verification failed: {path.name}")
+
+
 def upload_to_github(asset_paths: Iterable[Path], version: str) -> None:
     if not GITHUB_TOKEN:
         raise RuntimeError("GITHUB_TOKEN is required for publishing")
     assets = [Path(path) for path in asset_paths]
+    if len({path.name for path in assets}) != len(assets):
+        raise RuntimeError("Local release asset names must be unique")
     release_body = _release_body(version, assets)
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -511,11 +638,9 @@ def upload_to_github(asset_paths: Iterable[Path], version: str) -> None:
         _raise_for_api(create, "create draft release", {201})
         release = create.json()
 
-    upload_names = {path.name for path in assets}
     for existing_asset in release.get("assets", []):
-        if existing_asset.get("name") in upload_names:
-            deletion = requests.delete(existing_asset["url"], headers=headers)
-            _raise_for_api(deletion, "delete draft asset", {204})
+        deletion = requests.delete(existing_asset["url"], headers=headers)
+        _raise_for_api(deletion, "delete draft asset", {204})
 
     upload_url = str(release["upload_url"]).split("{")[0]
     for asset in assets:
@@ -537,6 +662,13 @@ def upload_to_github(asset_paths: Iterable[Path], version: str) -> None:
         ):
             raise RuntimeError(f"Uploaded asset verification failed: {asset.name}")
 
+    verified = requests.get(
+        f"{releases_url}/{release['id']}",
+        headers=headers,
+    )
+    _raise_for_api(verified, "verify draft release", {200})
+    _verify_release_assets(verified.json(), assets, version)
+
     published = requests.patch(
         f"{releases_url}/{release['id']}",
         headers=headers,
@@ -548,8 +680,9 @@ def upload_to_github(asset_paths: Iterable[Path], version: str) -> None:
 def build_release_assets(version: str) -> list[Path]:
     clean_build()
     runtime_asset = prepare_runtime_assets()
+    verified_yt_dlp = prepare_pinned_yt_dlp(REPO_ROOT / "data" / "node" / "node.exe")
     updater_outputs = build_updaters(version)
-    app_dir = build_main_app(version, updater_outputs)
+    app_dir = build_main_app(version, updater_outputs, verified_yt_dlp)
     setup = build_installer(version, app_dir)
     normalized_version = _normalize_version(version)
     if normalized_version == "1.0.13":

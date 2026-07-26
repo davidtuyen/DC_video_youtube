@@ -36,6 +36,40 @@ class UpdateManagerTests(unittest.TestCase):
         return path
 
     @staticmethod
+    def _write_v2_manifest(base_dir, node_bytes, license_bytes, asset_bytes=b"runtime archive"):
+        manifest = {
+            "schema_version": 2,
+            "release_tag": "1.0.13",
+            "asset": {
+                "name": "node-runtime-win-x64.pkg",
+                "sha256": hashlib.sha256(asset_bytes).hexdigest(),
+                "size": len(asset_bytes),
+            },
+            "node": {
+                "version": "24.12.0",
+                "minimum_version": "22.0.0",
+                "relative_path": "data/node/node.exe",
+                "sha256": hashlib.sha256(node_bytes).hexdigest(),
+            },
+            "files": [
+                {
+                    "path": "node.exe",
+                    "sha256": hashlib.sha256(node_bytes).hexdigest(),
+                    "size": len(node_bytes),
+                },
+                {
+                    "path": "LICENSE",
+                    "sha256": hashlib.sha256(license_bytes).hexdigest(),
+                    "size": len(license_bytes),
+                },
+            ],
+        }
+        path = Path(base_dir) / "data" / "runtime-manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    @staticmethod
     def _successful_runner(command, **_kwargs):
         executable = Path(command[0]).name.lower()
         if executable == "node.exe":
@@ -67,6 +101,42 @@ class UpdateManagerTests(unittest.TestCase):
 
             self.assertEqual(status.state, self.module.RuntimeState.HEALTHY)
             self.assertEqual(status.current_version, "24.12.0")
+
+    def test_check_runtime_reports_corrupt_when_v2_license_is_missing_or_changed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            node_bytes = b"portable-node"
+            license_bytes = b"official license"
+            self._write_v2_manifest(temp_dir, node_bytes, license_bytes)
+            node_dir = Path(temp_dir) / "data" / "node"
+            node_dir.mkdir(parents=True)
+            (node_dir / "node.exe").write_bytes(node_bytes)
+            manager = self.module.UpdateManager(
+                base_dir=temp_dir,
+                repo_owner="owner",
+                repo_name="repo",
+                command_runner=self._successful_runner,
+            )
+
+            missing = manager.check_runtime()
+            (node_dir / "LICENSE").write_bytes(b"tampered")
+            changed = manager.check_runtime()
+
+            self.assertEqual(missing.state, self.module.RuntimeState.CORRUPT)
+            self.assertIn("license", missing.error.lower())
+            self.assertEqual(changed.state, self.module.RuntimeState.CORRUPT)
+            self.assertIn("license", changed.error.lower())
+
+    def test_runtime_manifest_v2_requires_complete_file_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = self._write_v2_manifest(
+                temp_dir, b"portable-node", b"official license"
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"] = [manifest["files"][0]]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "LICENSE"):
+                self.module.RuntimeManifest.load(manifest_path)
 
     def test_version_comparison_handles_v_prefix_and_numeric_segments(self):
         self.assertGreater(
@@ -128,6 +198,35 @@ class UpdateManagerTests(unittest.TestCase):
                 (Path(temp_dir) / "data" / "node" / "node.exe").read_bytes(),
                 node_bytes,
             )
+
+    def test_repair_runtime_rejects_v2_asset_without_license(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            archive_path = Path(temp_dir) / "runtime.pkg"
+            node_bytes = b"repaired-node"
+            license_bytes = b"official license"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("node.exe", node_bytes)
+            archive_bytes = archive_path.read_bytes()
+            self._write_v2_manifest(
+                temp_dir, node_bytes, license_bytes, archive_bytes
+            )
+
+            def downloader(_url, destination, **_kwargs):
+                Path(destination).write_bytes(archive_bytes)
+
+            manager = self.module.UpdateManager(
+                base_dir=temp_dir,
+                repo_owner="owner",
+                repo_name="repo",
+                command_runner=self._successful_runner,
+                downloader=downloader,
+            )
+
+            result = manager.repair_runtime()
+
+            self.assertFalse(result.success)
+            self.assertIn("exactly node.exe and LICENSE", result.error)
+            self.assertFalse((Path(temp_dir) / "data" / "node" / "node.exe").exists())
 
     def test_repair_runtime_bad_checksum_preserves_existing_node(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -438,7 +537,7 @@ class UpdatePackageApplierTests(unittest.TestCase):
                 zf.writestr(relative_path, content)
             zf.writestr("update-manifest.json", json.dumps(manifest))
 
-    def test_apply_adds_missing_node_and_preserves_user_json(self):
+    def test_apply_rejects_partial_runtime_and_preserves_user_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             install_dir = Path(temp_dir) / "install"
             install_dir.mkdir()
@@ -458,9 +557,137 @@ class UpdatePackageApplierTests(unittest.TestCase):
 
             result = applier.apply(zip_path)
 
-            self.assertTrue(result.success, result.error)
-            self.assertEqual((install_dir / "data" / "node" / "node.exe").read_bytes(), b"portable-node")
+            self.assertFalse(result.success)
+            self.assertIn("runtime is incomplete", result.error)
+            self.assertFalse((install_dir / "data" / "node" / "node.exe").exists())
             self.assertEqual(settings_path.read_text(encoding="utf-8"), '{"user": true}')
+
+    def _make_v2_runtime_package(
+        self,
+        root: Path,
+        *,
+        node_bytes: bytes,
+        license_bytes: bytes,
+        app_bytes: bytes = b"new-app",
+        minimum_app_version: str = "1.0.15",
+    ) -> Path:
+        runtime_manifest = {
+            "schema_version": 2,
+            "release_tag": "1.0.15",
+            "asset": {
+                "name": "node-runtime-win-x64.pkg",
+                "sha256": "0" * 64,
+                "size": 1,
+            },
+            "node": {
+                "version": "24.12.0",
+                "minimum_version": "22.0.0",
+                "relative_path": "data/node/node.exe",
+                "sha256": hashlib.sha256(node_bytes).hexdigest(),
+            },
+            "files": [
+                {
+                    "path": "node.exe",
+                    "sha256": hashlib.sha256(node_bytes).hexdigest(),
+                    "size": len(node_bytes),
+                },
+                {
+                    "path": "LICENSE",
+                    "sha256": hashlib.sha256(license_bytes).hexdigest(),
+                    "size": len(license_bytes),
+                },
+            ],
+        }
+        files = {
+            "app.exe": app_bytes,
+            "data/node/node.exe": node_bytes,
+            "data/node/LICENSE": license_bytes,
+            "data/runtime-manifest.json": json.dumps(runtime_manifest).encode("utf-8"),
+        }
+        manifest = {
+            "schema_version": 2,
+            "app_version": "1.0.16",
+            "minimum_app_version": minimum_app_version,
+            "files": [
+                {
+                    "path": path,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                    "required": True,
+                    "component": "runtime" if path.startswith("data/") else "app",
+                }
+                for path, content in files.items()
+            ],
+        }
+        package = root / "app-update-v2.pkg"
+        self._make_update_zip(package, files, manifest)
+        return package
+
+    def test_apply_rejects_packaged_node_that_cannot_run_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            install_dir.mkdir()
+            (install_dir / "app.exe").write_bytes(b"old-app")
+            installed_manifest = install_dir / "data" / "installed-app-manifest.json"
+            installed_manifest.parent.mkdir(parents=True)
+            installed_manifest.write_text(json.dumps({
+                "schema_version": 2,
+                "app_version": "1.0.15",
+                "minimum_app_version": "1.0.13",
+                "files": [{"path": "app.exe", "component": "app"}],
+            }), encoding="utf-8")
+            package = self._make_v2_runtime_package(
+                Path(temp_dir), node_bytes=b"not-an-executable", license_bytes=b"license"
+            )
+
+            result = self.module.UpdatePackageApplier(
+                install_dir=install_dir,
+                command_runner=lambda command, **kwargs: subprocess.CompletedProcess(
+                    command, 1, "", "invalid executable"
+                ),
+            ).apply(package)
+
+            self.assertFalse(result.success)
+            self.assertFalse(result.rollback_performed)
+            self.assertIn("cannot run", result.error.lower())
+            self.assertEqual((install_dir / "app.exe").read_bytes(), b"old-app")
+            self.assertFalse((install_dir / "data" / "node" / "node.exe").exists())
+
+    def test_apply_rolls_back_all_files_when_packaged_node_fails_post_verify(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            install_dir = Path(temp_dir) / "install"
+            node_dir = install_dir / "data" / "node"
+            node_dir.mkdir(parents=True)
+            (install_dir / "app.exe").write_bytes(b"old-app")
+            (node_dir / "node.exe").write_bytes(b"old-node")
+            (node_dir / "LICENSE").write_bytes(b"old-license")
+            installed_manifest = install_dir / "data" / "installed-app-manifest.json"
+            installed_manifest.write_text(json.dumps({
+                "schema_version": 2,
+                "app_version": "1.0.15",
+                "minimum_app_version": "1.0.13",
+                "files": [{"path": "app.exe", "component": "app"}],
+            }), encoding="utf-8")
+            package = self._make_v2_runtime_package(
+                Path(temp_dir), node_bytes=b"new-node", license_bytes=b"new-license"
+            )
+
+            def runner(command, **_kwargs):
+                executable = Path(command[0])
+                if ".update-staging-" in str(executable):
+                    return subprocess.CompletedProcess(command, 0, "v24.12.0\n", "")
+                return subprocess.CompletedProcess(command, 1, "", "post-check failed")
+
+            result = self.module.UpdatePackageApplier(
+                install_dir=install_dir,
+                command_runner=runner,
+            ).apply(package)
+
+            self.assertFalse(result.success)
+            self.assertTrue(result.rollback_performed)
+            self.assertEqual((install_dir / "app.exe").read_bytes(), b"old-app")
+            self.assertEqual((node_dir / "node.exe").read_bytes(), b"old-node")
+            self.assertEqual((node_dir / "LICENSE").read_bytes(), b"old-license")
 
     def test_apply_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as temp_dir:

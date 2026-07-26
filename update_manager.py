@@ -135,11 +135,16 @@ class RuntimeManifest:
     asset_name: str
     asset_sha256: str
     asset_size: int | None = None
+    node_size: int | None = None
     license_sha256: str | None = None
+    license_size: int | None = None
 
     @classmethod
     def load(cls, path: str | os.PathLike[str]) -> "RuntimeManifest":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.from_data(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    @classmethod
+    def from_data(cls, data: dict) -> "RuntimeManifest":
         schema_version = data.get("schema_version")
         if schema_version not in {1, 2} or not isinstance(data.get("node"), dict):
             raise ValueError("runtime-manifest.json has an unsupported schema")
@@ -152,7 +157,9 @@ class RuntimeManifest:
             asset_name = str(node.get("asset_name", ""))
             asset_sha256 = str(node.get("asset_sha256", "")).lower()
             asset_size = None
+            node_size = None
             license_sha256 = None
+            license_size = None
         else:
             asset = data.get("asset")
             files = data.get("files")
@@ -161,12 +168,34 @@ class RuntimeManifest:
             asset_name = str(asset.get("name", ""))
             asset_sha256 = str(asset.get("sha256", "")).lower()
             asset_size = int(asset.get("size", 0))
-            file_hashes = {
-                str(entry.get("path", "")): str(entry.get("sha256", "")).lower()
-                for entry in files
-                if isinstance(entry, dict)
-            }
-            license_sha256 = file_hashes.get("LICENSE")
+            file_metadata: dict[str, tuple[str, int]] = {}
+            for entry in files:
+                if not isinstance(entry, dict):
+                    raise ValueError("runtime manifest v2 file metadata is invalid")
+                relative = str(entry.get("path", ""))
+                digest = str(entry.get("sha256", "")).lower()
+                try:
+                    size = int(entry.get("size", -1))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("runtime manifest v2 file size is invalid") from exc
+                if (
+                    relative in file_metadata
+                    or relative not in {"node.exe", "LICENSE"}
+                    or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                    or size <= 0
+                ):
+                    raise ValueError("runtime manifest v2 file metadata is invalid")
+                file_metadata[relative] = (digest, size)
+            missing_files = {"node.exe", "LICENSE"} - set(file_metadata)
+            if missing_files:
+                raise ValueError(
+                    "runtime manifest v2 is missing file metadata: "
+                    + ", ".join(sorted(missing_files))
+                )
+            node_file_sha256, node_size = file_metadata["node.exe"]
+            license_sha256, license_size = file_metadata["LICENSE"]
+            if node_file_sha256 != str(node.get("sha256", "")).lower():
+                raise ValueError("runtime manifest node.exe hashes disagree")
         if (
             not asset_name
             or not re.fullmatch(r"[0-9a-f]{64}", asset_sha256)
@@ -183,7 +212,9 @@ class RuntimeManifest:
             asset_name=asset_name,
             asset_sha256=asset_sha256,
             asset_size=asset_size,
+            node_size=node_size,
             license_sha256=license_sha256,
+            license_size=license_size,
         )
 
 
@@ -200,6 +231,46 @@ def _version_tuple(value: str) -> tuple[int, ...]:
     if not match:
         raise ValueError(f"invalid version: {value!r}")
     return tuple(int(part or 0) for part in match.groups())
+
+
+def _verify_runtime_files(
+    manifest: RuntimeManifest,
+    node_path: Path,
+    license_path: Path,
+    command_runner: CommandRunner,
+    *,
+    context: str,
+) -> str:
+    if not node_path.is_file():
+        raise ValueError(f"{context} is missing node.exe")
+    if manifest.node_size is not None and node_path.stat().st_size != manifest.node_size:
+        raise ValueError(f"{context} node.exe size mismatch")
+    if sha256_file(node_path) != manifest.sha256:
+        raise ValueError(f"{context} node.exe SHA256 mismatch")
+    if manifest.schema_version == 2:
+        if not license_path.is_file():
+            raise ValueError(f"{context} is missing LICENSE")
+        if manifest.license_size is None or license_path.stat().st_size != manifest.license_size:
+            raise ValueError(f"{context} LICENSE size mismatch")
+        if not manifest.license_sha256 or sha256_file(license_path) != manifest.license_sha256:
+            raise ValueError(f"{context} LICENSE SHA256 mismatch")
+    result = command_runner([str(node_path), "--version"])
+    if result.returncode != 0:
+        detail = (result.stderr or "unknown execution error").strip()
+        raise RuntimeError(f"{context} Node cannot run: {detail}")
+    current_version = (result.stdout or "").strip().lstrip("v")
+    if _version_tuple(current_version) < _version_tuple(manifest.minimum_version):
+        raise RuntimeError(
+            f"{context} Node {current_version} is below {manifest.minimum_version}"
+        )
+    if (
+        manifest.schema_version == 2
+        and _version_tuple(current_version) != _version_tuple(manifest.node_version)
+    ):
+        raise RuntimeError(
+            f"{context} Node version {current_version} does not match {manifest.node_version}"
+        )
+    return current_version
 
 
 def _safe_relative_path(value: str) -> PurePosixPath:
@@ -422,22 +493,40 @@ class UpdateManager:
                     required_version=manifest.minimum_version,
                     error="Node SHA256 does not match runtime manifest",
                 )
-            result = self.command_runner([str(node_path), "--version"])
-            if result.returncode != 0:
+            license_path = node_path.parent / "LICENSE"
+            if manifest.schema_version == 2 and (
+                not license_path.is_file()
+                or manifest.license_size is None
+                or license_path.stat().st_size != manifest.license_size
+                or not manifest.license_sha256
+                or sha256_file(license_path) != manifest.license_sha256
+            ):
                 return RuntimeStatus(
-                    RuntimeState.ERROR,
+                    RuntimeState.CORRUPT,
                     node_path,
                     required_version=manifest.minimum_version,
-                    error=(result.stderr or "Node failed to run").strip(),
+                    error="Node LICENSE does not match runtime manifest",
                 )
-            current_version = (result.stdout or "").strip().lstrip("v")
-            if _version_tuple(current_version) < _version_tuple(manifest.minimum_version):
-                return RuntimeStatus(
-                    RuntimeState.INCOMPATIBLE,
+            try:
+                current_version = _verify_runtime_files(
+                    manifest,
                     node_path,
-                    current_version=current_version,
+                    license_path,
+                    self.command_runner,
+                    context="Installed runtime",
+                )
+            except RuntimeError as exc:
+                error = str(exc)
+                state = (
+                    RuntimeState.INCOMPATIBLE
+                    if "below" in error or "does not match" in error
+                    else RuntimeState.ERROR
+                )
+                return RuntimeStatus(
+                    state,
+                    node_path,
                     required_version=manifest.minimum_version,
-                    error=f"Node {current_version} is below {manifest.minimum_version}",
+                    error=error,
                 )
             return RuntimeStatus(
                 RuntimeState.HEALTHY,
@@ -481,29 +570,28 @@ class UpdateManager:
         extract_dir.mkdir()
         with zipfile.ZipFile(archive_path, "r") as archive:
             members = _validate_zip_members(archive)
-            unexpected = set(members) - {"node.exe", "LICENSE"}
-            if unexpected:
-                raise ValueError(f"unexpected runtime files: {', '.join(sorted(unexpected))}")
+            expected_members = {"node.exe", "LICENSE"} if manifest.schema_version == 2 else {"node.exe"}
+            if manifest.schema_version == 1 and "LICENSE" in members:
+                expected_members.add("LICENSE")
+            if set(members) != expected_members:
+                raise ValueError("runtime asset must contain exactly node.exe and LICENSE")
             for name, member in members.items():
                 destination = extract_dir / name
                 with archive.open(member) as source, open(destination, "wb") as output:
                     shutil.copyfileobj(source, output)
 
         staged_node = extract_dir / "node.exe"
-        if not staged_node.is_file() or sha256_file(staged_node) != manifest.sha256:
-            raise ValueError("Node executable SHA256 mismatch")
-        version_result = self.command_runner([str(staged_node), "--version"])
-        if version_result.returncode != 0:
-            raise RuntimeError((version_result.stderr or "Downloaded Node cannot run").strip())
-        staged_version = (version_result.stdout or "").strip().lstrip("v")
-        if _version_tuple(staged_version) < _version_tuple(manifest.minimum_version):
-            raise RuntimeError(f"Downloaded Node {staged_version} is unsupported")
+        staged_license = extract_dir / "LICENSE"
+        _verify_runtime_files(
+            manifest,
+            staged_node,
+            staged_license,
+            self.command_runner,
+            context="Downloaded runtime",
+        )
 
         replacements = [(staged_node, target)]
-        staged_license = extract_dir / "LICENSE"
         if staged_license.is_file():
-            if manifest.license_sha256 and sha256_file(staged_license) != manifest.license_sha256:
-                raise ValueError("Node LICENSE SHA256 mismatch")
             replacements.append((staged_license, target.parent / "LICENSE"))
         return manifest, staged_node, replacements
 
@@ -731,6 +819,10 @@ class UpdateManager:
                 for entry in manifest["files"]
             }
             package_has_node = "data/node/node.exe" in package_paths
+            if package_has_node:
+                UpdatePackageApplier.verify_embedded_runtime(
+                    Path(temp_name), self.command_runner
+                )
             runtime_status = self.check_runtime()
             if runtime_status.state is not RuntimeState.HEALTHY and not package_has_node:
                 self.status_callback("Node portable đang thiếu hoặc hỏng; đang chuẩn bị gói sửa...")
@@ -755,17 +847,30 @@ class UpdateManager:
                 with tempfile.TemporaryDirectory(prefix="node_runtime_verify_") as verify_dir:
                     with zipfile.ZipFile(runtime_temp_name, "r") as runtime_archive:
                         runtime_members = _validate_zip_members(runtime_archive)
-                        node_member = runtime_members.get("node.exe")
-                        if node_member is None:
-                            raise ValueError("Node runtime asset is missing node.exe")
-                        staged_node = Path(verify_dir) / "node.exe"
-                        with runtime_archive.open(node_member) as source, open(staged_node, "wb") as output:
-                            shutil.copyfileobj(source, output)
-                    if sha256_file(staged_node) != runtime_manifest.sha256:
-                        raise ValueError("Node executable SHA256 mismatch")
-                    version_result = self.command_runner([str(staged_node), "--version"])
-                    if version_result.returncode != 0:
-                        raise RuntimeError("Downloaded Node cannot run")
+                        expected_members = (
+                            {"node.exe", "LICENSE"}
+                            if runtime_manifest.schema_version == 2
+                            else {"node.exe"}
+                        )
+                        if runtime_manifest.schema_version == 1 and "LICENSE" in runtime_members:
+                            expected_members.add("LICENSE")
+                        if set(runtime_members) != expected_members:
+                            raise ValueError(
+                                "runtime asset must contain exactly node.exe and LICENSE"
+                            )
+                        for name, member in runtime_members.items():
+                            destination = Path(verify_dir) / name
+                            with runtime_archive.open(member) as source, open(
+                                destination, "wb"
+                            ) as output:
+                                shutil.copyfileobj(source, output)
+                    _verify_runtime_files(
+                        runtime_manifest,
+                        Path(verify_dir) / "node.exe",
+                        Path(verify_dir) / "LICENSE",
+                        self.command_runner,
+                        context="Downloaded runtime",
+                    )
                 changed.append("node")
             elif package_has_node:
                 changed.append("node")
@@ -853,6 +958,7 @@ class UpdatePackageApplier:
                 raise ValueError("v2 update manifest is missing version constraints")
             expected_paths = set()
             expected_canonical = set()
+            entries_by_canonical = {}
             for entry in manifest["files"]:
                 relative = str(_safe_relative_path(str(entry.get("path", ""))))
                 canonical = _canonical_windows_path(relative)
@@ -860,6 +966,7 @@ class UpdatePackageApplier:
                     raise ValueError(f"duplicate manifest path: {relative}")
                 expected_canonical.add(canonical)
                 expected_paths.add(relative)
+                entries_by_canonical[canonical] = entry
                 member = file_members.get(relative)
                 if member is None:
                     raise ValueError(f"required update file is missing: {relative}")
@@ -878,7 +985,80 @@ class UpdatePackageApplier:
             extra = set(file_members) - expected_paths - {"update-manifest.json"}
             if extra:
                 raise ValueError(f"unmanifested update files: {', '.join(sorted(extra))}")
+            runtime_paths = {
+                "data/node/node.exe",
+                "data/node/license",
+                "data/runtime-manifest.json",
+            }
+            present_runtime_paths = runtime_paths & set(entries_by_canonical)
+            if present_runtime_paths and present_runtime_paths != runtime_paths:
+                missing = runtime_paths - present_runtime_paths
+                raise ValueError(
+                    "smart package runtime is incomplete: " + ", ".join(sorted(missing))
+                )
+            if present_runtime_paths:
+                if _version_tuple(str(manifest["minimum_app_version"])) < (1, 0, 15):
+                    raise ValueError("smart package containing runtime requires app 1.0.15")
+                for runtime_path in runtime_paths:
+                    if entries_by_canonical[runtime_path].get("component") != "runtime":
+                        raise ValueError(f"invalid runtime component: {runtime_path}")
+                runtime_data = json.loads(
+                    archive.read(file_members["data/runtime-manifest.json"]).decode("utf-8")
+                )
+                runtime_manifest = RuntimeManifest.from_data(runtime_data)
+                if runtime_manifest.schema_version != 2:
+                    raise ValueError("smart package runtime manifest must use schema v2")
+                if runtime_manifest.relative_path.casefold() != "data/node/node.exe":
+                    raise ValueError("smart package runtime path is invalid")
+                node_entry = entries_by_canonical["data/node/node.exe"]
+                license_entry = entries_by_canonical["data/node/license"]
+                if (
+                    str(node_entry.get("sha256", "")).lower() != runtime_manifest.sha256
+                    or int(node_entry.get("size", -1)) != runtime_manifest.node_size
+                    or str(license_entry.get("sha256", "")).lower()
+                    != runtime_manifest.license_sha256
+                    or int(license_entry.get("size", -1)) != runtime_manifest.license_size
+                ):
+                    raise ValueError("smart package runtime metadata does not match its files")
             return manifest
+
+    @staticmethod
+    def verify_embedded_runtime(
+        zip_path: str | os.PathLike[str],
+        command_runner: CommandRunner = _default_command_runner,
+    ) -> RuntimeManifest | None:
+        manifest = UpdatePackageApplier.validate_package(zip_path)
+        package_paths = {
+            _canonical_windows_path(str(entry["path"])) for entry in manifest["files"]
+        }
+        if "data/node/node.exe" not in package_paths:
+            return None
+        with tempfile.TemporaryDirectory(prefix="smart_runtime_verify_") as temp_dir:
+            staging = Path(temp_dir)
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                members = _validate_zip_members(archive)
+                for relative_text in (
+                    "data/node/node.exe",
+                    "data/node/LICENSE",
+                    "data/runtime-manifest.json",
+                ):
+                    destination = staging / Path(*PurePosixPath(relative_text).parts)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(members[relative_text]) as source, open(
+                        destination, "wb"
+                    ) as output:
+                        shutil.copyfileobj(source, output)
+            runtime_manifest = RuntimeManifest.load(
+                staging / "data" / "runtime-manifest.json"
+            )
+            _verify_runtime_files(
+                runtime_manifest,
+                staging / "data" / "node" / "node.exe",
+                staging / "data" / "node" / "LICENSE",
+                command_runner,
+                context="Packaged runtime",
+            )
+            return runtime_manifest
 
     def apply(
         self,
@@ -939,6 +1119,22 @@ class UpdatePackageApplier:
                         shutil.copyfileobj(source, output)
                     replacements.append((staged, target))
 
+            package_paths = {
+                _canonical_windows_path(str(entry["path"])) for entry in manifest["files"]
+            }
+            packaged_runtime: RuntimeManifest | None = None
+            if "data/node/node.exe" in package_paths:
+                packaged_runtime = RuntimeManifest.load(
+                    staging_root / "data" / "runtime-manifest.json"
+                )
+                _verify_runtime_files(
+                    packaged_runtime,
+                    staging_root / "data" / "node" / "node.exe",
+                    staging_root / "data" / "node" / "LICENSE",
+                    self.command_runner,
+                    context="Packaged runtime",
+                )
+
             prepared_runtime: RuntimeManifest | None = None
             if runtime_package is not None:
                 prepared_runtime = RuntimeManifest.load(
@@ -956,35 +1152,33 @@ class UpdatePackageApplier:
                 runtime_staging.mkdir()
                 with zipfile.ZipFile(runtime_package_path, "r") as runtime_archive:
                     runtime_members = _validate_zip_members(runtime_archive)
-                    unexpected = set(runtime_members) - {"node.exe", "LICENSE"}
-                    if unexpected:
-                        raise ValueError(
-                            f"unexpected runtime files: {', '.join(sorted(unexpected))}"
-                        )
+                    expected_runtime_members = (
+                        {"node.exe", "LICENSE"}
+                        if prepared_runtime.schema_version == 2
+                        else {"node.exe"}
+                    )
+                    if prepared_runtime.schema_version == 1 and "LICENSE" in runtime_members:
+                        expected_runtime_members.add("LICENSE")
+                    if set(runtime_members) != expected_runtime_members:
+                        raise ValueError("runtime asset must contain exactly node.exe and LICENSE")
                     for name, member in runtime_members.items():
                         destination = runtime_staging / name
                         with runtime_archive.open(member) as source, open(destination, "wb") as output:
                             shutil.copyfileobj(source, output)
                 staged_node = runtime_staging / "node.exe"
-                if not staged_node.is_file() or sha256_file(staged_node) != prepared_runtime.sha256:
-                    raise ValueError("Node executable SHA256 mismatch")
-                version_result = self.command_runner([str(staged_node), "--version"])
-                staged_version = (version_result.stdout or "").strip().lstrip("v")
-                if version_result.returncode != 0 or (
-                    _version_tuple(staged_version) < _version_tuple(prepared_runtime.minimum_version)
-                ):
-                    raise RuntimeError("Prepared Node runtime cannot run")
+                staged_license = runtime_staging / "LICENSE"
+                _verify_runtime_files(
+                    prepared_runtime,
+                    staged_node,
+                    staged_license,
+                    self.command_runner,
+                    context="Prepared runtime",
+                )
                 runtime_relative = _safe_relative_path(prepared_runtime.relative_path)
                 replacements.append(
                     (staged_node, target_for(str(runtime_relative)))
                 )
-                staged_license = runtime_staging / "LICENSE"
                 if staged_license.is_file():
-                    if (
-                        prepared_runtime.license_sha256
-                        and sha256_file(staged_license) != prepared_runtime.license_sha256
-                    ):
-                        raise ValueError("Node LICENSE SHA256 mismatch")
                     replacements.append(
                         (staged_license, target_for("data/node/LICENSE"))
                     )
@@ -1031,14 +1225,21 @@ class UpdatePackageApplier:
                         raise RuntimeError(f"stale app file was not removed: {stale_target}")
                 if prepared_runtime is not None:
                     runtime_target = target_for(prepared_runtime.relative_path)
-                    if (
-                        not runtime_target.is_file()
-                        or sha256_file(runtime_target) != prepared_runtime.sha256
-                    ):
-                        raise RuntimeError("post-update Node verification failed")
-                    runtime_result = self.command_runner([str(runtime_target), "--version"])
-                    if runtime_result.returncode != 0:
-                        raise RuntimeError("installed Node runtime cannot run")
+                    _verify_runtime_files(
+                        prepared_runtime,
+                        runtime_target,
+                        target_for("data/node/LICENSE"),
+                        self.command_runner,
+                        context="Installed runtime",
+                    )
+                if packaged_runtime is not None:
+                    _verify_runtime_files(
+                        packaged_runtime,
+                        target_for(packaged_runtime.relative_path),
+                        target_for("data/node/LICENSE"),
+                        self.command_runner,
+                        context="Installed packaged runtime",
+                    )
 
             _atomic_replace_files(replacements, deletions=stale_targets, verify=verify_install)
             if self.progress_callback:
@@ -1062,7 +1263,9 @@ class UpdatePackageApplier:
             True,
             "app",
             new_version=str(manifest.get("app_version") or ""),
-            changed_components=("node", "app") if runtime_package is not None else ("app",),
+            changed_components=("node", "app")
+            if runtime_package is not None or packaged_runtime is not None
+            else ("app",),
             message="Cập nhật ứng dụng thành công",
             stage="complete",
         )
@@ -1098,26 +1301,26 @@ def create_runtime_asset(
     node_path = source_dir / "node.exe"
     if not node_path.is_file():
         raise FileNotFoundError(f"portable Node not found: {node_path}")
+    license_path = source_dir / "LICENSE"
+    if not license_path.is_file():
+        raise FileNotFoundError(f"portable Node LICENSE not found: {license_path}")
 
     output_path = Path(output_zip)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        for source_path in (node_path, source_dir / "LICENSE"):
-            if not source_path.is_file():
-                continue
+        for source_path in (node_path, license_path):
             info = zipfile.ZipInfo(source_path.name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             archive.writestr(info, source_path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
     files = []
-    for source_path in (node_path, source_dir / "LICENSE"):
-        if source_path.is_file():
-            files.append({
-                "path": source_path.name,
-                "sha256": sha256_file(source_path),
-                "size": source_path.stat().st_size,
-            })
+    for source_path in (node_path, license_path):
+        files.append({
+            "path": source_path.name,
+            "sha256": sha256_file(source_path),
+            "size": source_path.stat().st_size,
+        })
     manifest = {
         "schema_version": 2,
         "platform": "win-x64",

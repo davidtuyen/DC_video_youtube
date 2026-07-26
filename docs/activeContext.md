@@ -2,7 +2,7 @@
 
 ## Current Focus
 
-v1.0.14 là bản Smart Update đầu tiên, đồng thời sửa smoke test yt-dlp thành kiểm tra offline.
+v1.0.15 củng cố runtime transaction, nâng updater worker lên 2.1.0 và ghim yt-dlp 2026.07.04 cho Setup.
 
 ## Update migration
 
@@ -13,6 +13,10 @@ v1.0.14 là bản Smart Update đầu tiên, đồng thời sửa smoke test yt-
 - Hai nút cập nhật vẫn độc lập; chúng chỉ dùng chung transaction, mutex, checksum, proxy, progress và log.
 - Smoke test yt-dlp dùng extractor nội bộ `test:`; không truy cập YouTube hoặc tải video.
 - Setup v1.0.14 có checkbox tạo Desktop shortcut và được chọn mặc định.
+- v1.0.15 xác minh đầy đủ `node.exe` + `LICENSE`; Node 24.12.0 không đổi nên không nằm trong Smart package.
+- Smart Update v1.0.15 đưa worker 2.1.0 vào package; launcher ổn định tiếp tục tự chọn worker từ manifest.
+- Setup v1.0.15 chỉ nhận yt-dlp 2026.07.04 đã đối chiếu checksum chính thức, version và smoke test offline.
+- Publisher retry draft bằng cách xóa sạch asset cũ và chỉ publish khi tập asset khớp chính xác.
 
 ## Existing features
 
