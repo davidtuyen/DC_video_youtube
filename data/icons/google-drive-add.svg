@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <title>Thêm liên kết Google Drive</title>
+  <path fill="#0F9D58" d="M7.7 2.75 1.2 14.1l3.25 5.7 6.5-11.35z"/>
+  <path fill="#F4B400" d="M7.7 2.75h6.5l6.5 11.35h-6.5z"/>
+  <path fill="#4285F4" d="M4.45 19.8 7.7 14.1h13l-3.25 5.7z"/>
+  <circle cx="18.25" cy="18.25" r="5.5" fill="#FFFFFF"/>
+  <circle cx="18.25" cy="18.25" r="4.35" fill="#1967D2"/>
+  <path d="M18.25 15.8v4.9M15.8 18.25h4.9" fill="none" stroke="#FFFFFF" stroke-width="1.65" stroke-linecap="round"/>
+</svg>

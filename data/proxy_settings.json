@@ -1,0 +1,15 @@
+{
+    "M2_CONFIG": {
+        "base_url": "https://api.m2proxy.com",
+        "user_token": "53899c1deb7dc29ecdfef0f348dc66fc",
+        "package_api_key": "6170c6bb79e6167b3912db2416e5dfd2"
+    },
+    "PROXY_CONNECTION": {
+        "host": "vnpt2.m2proxy.com",
+        "port": 8384,
+        "username": "Wikiteam",
+        "password": "Manhtuyenlak@9x"
+    },
+    "proxy_cooldown_seconds": 120,
+    "ip_checker_service_url": "https://api.ipify.org?format=json"
+}

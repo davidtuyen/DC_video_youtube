@@ -1,0 +1,15 @@
+*.exe
+*.zip
+__pycache__/
+build/
+dist/
+
+# Sensitive data
+data/ffmpeg/
+data/token*.json
+data/credentials.json
+data/proxy_settings.json
+youtube_cookies.txt
+
+# Release folder
+YouTube Downloader Pro/

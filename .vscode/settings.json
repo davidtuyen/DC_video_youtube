@@ -1,0 +1,10 @@
+{
+  "python.analysis.extraPaths": [
+    "C:\\Users\\PC\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages",
+    "."
+  ],
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.ignore": ["**"],
+  "pylance.insidersChannel": "off",
+  "pyre2.enabled": false
+}
