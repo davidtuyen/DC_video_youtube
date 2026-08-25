@@ -1,0 +1,14 @@
+{
+  "include": ["."],
+  "exclude": ["__pycache__", "build", "dist", ".git"],
+  "pythonPath": "C:/Users/PC/AppData/Local/Programs/Python/Python311/python.exe",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportMissingModuleSource": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportOperatorIssue": "none",
+  "reportPrivateImportUsage": "none",
+  "reportArgumentType": "none",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "off"
+}
