@@ -1,0 +1,26 @@
+*.exe
+*.zip
+__pycache__/
+.pytest_cache/
+build/
+dist/
+missing-dist-for-test/
+*.part
+
+# Workspace-local tooling
+.agent/
+.vscode/
+
+# Sensitive data
+data/ffmpeg/
+data/token*.json
+data/credentials.json
+data/proxy_settings.json
+data/browser/
+data/thumbnails/
+data/download_history.json
+data/downloader_settings*.json
+youtube_cookies.txt
+
+# Release folder
+YouTube Downloader Pro/

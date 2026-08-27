@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "platform": "win-x64",
+  "release_tag": "1.0.17",
+  "asset": {
+    "name": "node-runtime-win-x64.pkg",
+    "sha256": "fcba604e1d5dfbbd16c3aafc1c8e55155ce32591f200eabb7dec150f09e6daf5",
+    "size": 33464447
+  },
+  "node": {
+    "version": "24.12.0",
+    "minimum_version": "22.0.0",
+    "relative_path": "data/node/node.exe",
+    "sha256": "2ffe3acc0458fdde999f50d11809bbe7c9b7ef204dcf17094e325d26ace101d8"
+  },
+  "files": [
+    {
+      "path": "node.exe",
+      "sha256": "2ffe3acc0458fdde999f50d11809bbe7c9b7ef204dcf17094e325d26ace101d8",
+      "size": 89935872
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "b4c7840e841ab8f14543646bd941d01a459fb0f8ce1249244341b2a63272ca79",
+      "size": 145976
+    }
+  ]
+}
